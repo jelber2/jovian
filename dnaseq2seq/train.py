@@ -1,13 +1,17 @@
 
+
+
 import logging
 import sys
 from collections import defaultdict
 import time
 
+
 import yaml
 from datetime import datetime
 import os
 from pygit2 import Repository
+
 
 import torch
 from torch import nn
@@ -15,13 +19,17 @@ import torch.distributed as dist
 from torch.cuda.amp import GradScaler
 import torch.cuda.amp as amp
 
+
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 
-import dnaseq2seq.vcf as vcf
-import dnaseq2seq.loader as loader
-import dnaseq2seq.util as util
+
+
+from dnaseq2seq import vcf
+from dnaseq2seq import loader
+from dnaseq2seq import util
 from dnaseq2seq.model import VarTransformer
+
 
 LOG_FORMAT  ='[%(asctime)s] %(process)d  %(name)s  %(levelname)s  %(message)s'
 formatter = logging.Formatter(LOG_FORMAT)
@@ -29,20 +37,28 @@ handler = logging.FileHandler("jovian_train.log")
 handler.setLevel(logging.INFO)
 handler.setFormatter(formatter)
 
+
 logger = logging.getLogger(__name__)
 logger.addHandler(handler)
 
 
 
 
-USE_DDP = int(os.environ.get('RANK', -1)) >= 0 and os.environ.get('WORLD_SIZE') is not None
-MASTER_PROCESS = (not USE_DDP) or os.environ.get('RANK') == '0'
+
+
+
+
+USE_DDP = True
+MASTER_PROCESS = True
 DEVICE = None # This is set in the 'train' method
+
+
 
 
 if os.getenv("ENABLE_COMET") and MASTER_PROCESS:
     logger.info("Enabling Comet.ai logging")
     from comet_ml import Experiment
+
 
     experiment = Experiment(
       api_key=os.getenv('COMET_API_KEY'),
@@ -54,8 +70,12 @@ else:
 
 
 
+
+
+
 class TrainLogger:
     """ Simple utility for writing various items to a log file CSV """
+
 
     def __init__(self, output, headers):
         self.headers = list(headers)
@@ -66,9 +86,12 @@ class TrainLogger:
         self._write_header()
 
 
+
+
     def _write_header(self):
         self.output.write(",".join(self.headers) + "\n")
         self._flush_and_fsync()
+
 
     def _flush_and_fsync(self):
         try:
@@ -76,6 +99,7 @@ class TrainLogger:
             os.fsync()
         except:
             pass
+
 
     def log(self, items):
         assert len(items) == len(self.headers), f"Expected {len(self.headers)} items to log, but got {len(items)}"
@@ -86,12 +110,20 @@ class TrainLogger:
 
 
 
+
+
+
 def compute_twohap_loss(preds, tgt, criterion):
     """
     Iterate over every item in the batch, and compute the loss in both configurations (under torch.no_grad())
     then swap haplotypes (dimension index 1) in the predictions if that leads to a lower loss
     Finally, re-compute loss with the new configuration for all samples and return it, storing gradients this time
     """
+
+
+    new_preds = preds.clone()  # Create a new tensor to store the modified predictions
+
+
     # Compute losses in both configurations, and use the best
     with torch.no_grad():
         swaps = 0
@@ -101,11 +133,15 @@ def compute_twohap_loss(preds, tgt, criterion):
             loss2 = criterion(preds[b, :, :, :].flatten(start_dim=0, end_dim=1),
                               tgt[b, torch.tensor([1, 0]), :].flatten())
 
+
             if loss2.mean() < loss1.mean():
-                preds[b, :, :, :] = preds[b, torch.tensor([1, 0]), :]
+                new_preds[b, :, :, :] = preds[b, torch.tensor([1, 0]), :]  # Modify the new tensor instead of preds
+#                preds[b, :, :, :] = preds[b, torch.tensor([1, 0]), :]
                 swaps += 1
 
-    return criterion(preds.flatten(start_dim=0, end_dim=2), tgt.flatten()), swaps
+
+#    return criterion(preds.flatten(start_dim=0, end_dim=2), tgt.flatten()), swaps
+    return criterion(new_preds.flatten(start_dim=0, end_dim=2), tgt.flatten()), swaps
 
 
 def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_schedule=None, enable_amp=False):
@@ -125,14 +161,18 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
         tgt_expected = tgt_kmer_idx[:, :, 1:]
         tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_kmers_input.shape[-2]).to(DEVICE)
 
+
         optimizer.zero_grad()
         logger.debug("Forward pass...")
+
 
         with amp.autocast(enabled=enable_amp): # dtype is bfloat16 by default
             seq_preds = model(src, tgt_kmers_input, tgt_mask)
 
+
             logger.debug(f"Computing loss...")
             loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
+
 
         scaler.scale(loss).backward()
         loss_sum += loss.item()
@@ -154,6 +194,7 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
             start = time.perf_counter()
             samples_perf = 0
 
+
         if lr_schedule and batch % 10 == 0:
             lr = lr_schedule.get_lr()
             logger.info(f"LR samples seen: {lr_schedule.iters}, learning rate: {lr_schedule.get_last_lr() :.6f}")
@@ -162,6 +203,8 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
         samples_seen += src.shape[0]
         if samples_seen > num_samples:
             return loss_sum
+
+
 
 
 def iter_indefinitely(loader, batch_size):
@@ -173,11 +216,15 @@ def iter_indefinitely(loader, batch_size):
         logger.info(f"Completed iteration {iterations} of all training data")
 
 
+
+
 def add_result_dicts(src, add):
     for key, subdict in add.items():
         for subkey, value in subdict.items():
             src[key][subkey] += value
     return src
+
+
 
 
 def _calc_hap_accuracy(src, seq_preds, tgt, result_totals):
@@ -186,19 +233,25 @@ def _calc_hap_accuracy(src, seq_preds, tgt, result_totals):
                              dim=1) == tgt[:, :].flatten()
                 ).float().mean()
 
+
     var_count = 0
+
 
     for b in range(src.shape[0]):
         predstr = util.kmer_preds_to_seq(seq_preds[b, :, 0:util.KMER_COUNT], util.i2s)
         tgtstr = util.kmer_idx_to_str(tgt[b, :], util.i2s)
-        vc = len(list(vcf.aln_to_vars(tgtstr, predstr)))
+        vc = len(list(vcf.aln_to_vars(tgtstr, predstr, chrom='X'))) # chrom arbitrary, required for building variant objs
         var_count += vc
+
 
         # Get TP, FN and FN based on reference, alt and predicted sequence.
         vartype_count = eval_prediction(util.readstr(src[b, :, 0, :]), tgtstr, seq_preds[b, :, 0:util.KMER_COUNT], counts=init_count_dict())
         result_totals = add_result_dicts(result_totals, vartype_count)
 
+
     return match, var_count, result_totals
+
+
 
 
 def eval_prediction(refseqstr, altseq, predictions, counts):
@@ -212,13 +265,15 @@ def eval_prediction(refseqstr, altseq, predictions, counts):
     :return: Sets of TP, FP, and FN vars
     """
     known_vars = []
-    for v in vcf.aln_to_vars(refseqstr, altseq):
+    for v in vcf.aln_to_vars(refseqstr, altseq, chrom='X'):
         known_vars.append(v)
+
 
     pred_vars = []
     predstr = util.kmer_preds_to_seq(predictions[:, 0:util.KMER_COUNT], util.i2s)
-    for v in vcf.aln_to_vars(refseqstr, predstr):
+    for v in vcf.aln_to_vars(refseqstr, predstr, chrom='X'):
         pred_vars.append(v)
+
 
     for true_var in known_vars:
         true_var_type = util.var_type(true_var)
@@ -227,12 +282,17 @@ def eval_prediction(refseqstr, altseq, predictions, counts):
         else:
             counts[true_var_type]['fn'] += 1
 
+
     for detected_var in pred_vars:
         if detected_var not in known_vars:
             vartype = util.var_type(detected_var)
             counts[vartype]['fp'] += 1
 
+
     return counts
+
+
+
 
 
 
@@ -252,11 +312,13 @@ def calc_val_accuracy(loader, model, criterion):
         result_totals0 = init_count_dict()
         result_totals1 = init_count_dict()
 
+
         var_counts_sum0 = 0
         var_counts_sum1 = 0
         tot_samples = 0
         total_batches = 0
         loss_tot = 0
+
 
         swap_tot = 0
         for src, tgt_kmers, vaf, *_ in loader.iter_once(64):
@@ -264,19 +326,23 @@ def calc_val_accuracy(loader, model, criterion):
             tot_samples += src.shape[0]
             seq_preds, probs = util.predict_sequence(src, model, n_output_toks=37, device=DEVICE) # 150 // 4 = 37, this will need to be changed if we ever want to change the output length
 
+
             #tgt_kmers = util.tgt_to_kmers(tgt[:, :, 0:truncate_seq_len]).float().to(DEVICE)
             tgt_kmer_idx = torch.argmax(tgt_kmers, dim=-1)[:, :, 1:]
             j = tgt_kmer_idx.shape[-1]
             seq_preds = seq_preds[:, :, 0:j, :] # tgt_kmer_idx might be a bit shorter if the sequence is truncated
 
+
             loss, swaps = compute_twohap_loss(seq_preds, tgt_kmer_idx, criterion)
             loss_tot += loss
             swap_tot += swaps
+
 
             midmatch0, varcount0, results_totals0 = _calc_hap_accuracy(src, seq_preds[:, 0, :, :], tgt_kmer_idx[:, 0, :], result_totals0)
             midmatch1, varcount1, results_totals1 = _calc_hap_accuracy(src, seq_preds[:, 1, :, :], tgt_kmer_idx[:, 1, :], result_totals1)
             match_sum0 += midmatch0
             match_sum1 += midmatch1
+
 
             var_counts_sum0 += varcount0
             var_counts_sum1 += varcount1
@@ -288,6 +354,8 @@ def calc_val_accuracy(loader, model, criterion):
             result_totals0, result_totals1,
             loss_tot,
             swap_tot)
+
+
 
 
 def safe_compute_ppav(results0, results1, key):
@@ -302,7 +370,9 @@ def safe_compute_ppav(results0, results1, key):
     except ZeroDivisionError:
         ppv = 0
 
+
     return ppa, ppv
+
 
 def load_model(modelconf, ckpt):
     # 35M model params
@@ -313,6 +383,7 @@ def load_model(modelconf, ckpt):
     # decoder_layers = 4 # was 2
     # embed_dim_factor = 100 # was 100
 
+
     # 50M model params
     # encoder_attention_heads = 8 # was 4
     # decoder_attention_heads = 4 # was 4
@@ -320,6 +391,7 @@ def load_model(modelconf, ckpt):
     # encoder_layers = 8
     # decoder_layers = 6 # was 2
     # embed_dim_factor = 120 # was 100
+
 
     # Wider model
     # encoder_attention_heads = 4 # was 4
@@ -329,6 +401,7 @@ def load_model(modelconf, ckpt):
     # decoder_layers = 6 # was 2
     # embed_dim_factor = 200 # was 100
 
+
     # 100M params
     # encoder_attention_heads = 8  # was 4
     # decoder_attention_heads = 10  # was 4
@@ -336,6 +409,7 @@ def load_model(modelconf, ckpt):
     # encoder_layers = 10
     # decoder_layers = 10  # was 2
     # embed_dim_factor = 160  # was 100
+
 
     # 200M params
     # encoder_attention_heads = 12 # was 4
@@ -345,6 +419,7 @@ def load_model(modelconf, ckpt):
     # decoder_layers = 10 # was 2
     # embed_dim_factor = 160 # was 100
 
+
     # More layers but less model dim
     # encoder_attention_heads = 10 # was 4
     # decoder_attention_heads = 10 # Must evenly divide 260
@@ -352,6 +427,7 @@ def load_model(modelconf, ckpt):
     # encoder_layers = 14
     # decoder_layers = 14 # was 2
     # embed_dim_factor = 160 # was 100
+
 
     # Small, for testing params
     # encoder_attention_heads = 2  # was 4
@@ -372,9 +448,11 @@ def load_model(modelconf, ckpt):
         else:
             statedict = ckpt
 
+
         if 'conf' in ckpt:
             logger.warning(f"Found model conf AND a checkpoint with model conf - using the model params from checkpoint")
             modelconf = ckpt['conf']
+
 
     model = VarTransformer(read_depth=modelconf['max_read_depth'],
                            feature_count=modelconf['feats_per_read'],
@@ -388,6 +466,7 @@ def load_model(modelconf, ckpt):
                            device=DEVICE)
     model_tot_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Creating model with {model_tot_params} trainable params")
+
 
     if statedict is not None:
         logger.info(f"Initializing model weights from state dict")
@@ -409,8 +488,10 @@ def load_model(modelconf, ckpt):
     else:
         model = model.to(DEVICE)
 
+
     model.train()
     return model
+
 
 def train_epochs(model,
                  optimizer,
@@ -426,10 +507,14 @@ def train_epochs(model,
 ):
 
 
+
+
     criterion = nn.NLLLoss()
+
 
     trainlogpath = str(model_dest).replace(".model", "").replace(".pt", "") + "_train.log"
     logger.info(f"Training log data will be saved at {trainlogpath}")
+
 
     swaps = 0
     trainlogger = TrainLogger(trainlogpath, [
@@ -437,6 +522,8 @@ def train_epochs(model,
             "mean_var_count", "ppa_dels", "ppa_ins", "ppa_snv",
             "ppv_dels", "ppv_ins", "ppv_snv", "learning_rate", "epochtime",
     ])
+
+
 
 
     if val_dir:
@@ -447,6 +534,7 @@ def train_epochs(model,
         valpaths = dataloader.retain_val_samples(fraction=0.05)
         val_loader = loader.PregenLoader(device=DEVICE, datadir=None, pathpairs=valpaths, threads=4, tgt_prefix="tgkmers")
         logger.info(f"Pulled {len(valpaths)} samples to use for validation")
+
 
     try:
         sample_iter = iter_indefinitely(dataloader, batch_size)
@@ -460,14 +548,18 @@ def train_epochs(model,
                               samples_per_epoch,
                               scheduler)
 
+
             elapsed = datetime.now() - starttime
+
 
             if MASTER_PROCESS:
                 acc0, acc1, var_count0, var_count1, results0, results1, val_loss, swaps = calc_val_accuracy(val_loader, model, criterion)
 
+
                 ppa_dels, ppv_dels = safe_compute_ppav(results0, results1, 'del')
                 ppa_ins, ppv_ins = safe_compute_ppav(results0, results1, 'ins')
                 ppa_snv, ppv_snv = safe_compute_ppav(results0, results1, 'snv')
+
 
                 logger.info(f"Epoch {epoch} Secs: {elapsed.total_seconds():.2f} lr: {scheduler.get_last_lr():.5f} loss: {loss:.4f} val acc: {acc0:.3f} / {acc1:.3f}  ppa: {ppa_snv:.3f} / {ppa_ins:.3f} / {ppa_dels:.3f}  ppv: {ppv_snv:.3f} / {ppv_ins:.3f} / {ppv_dels:.3f} swaps: {swaps}")
                 trainlogger.log({
@@ -505,6 +597,7 @@ def train_epochs(model,
                     "epochtime": elapsed.total_seconds(),
                 }, step=epoch)
 
+
             if MASTER_PROCESS and epoch > -1 and checkpoint_freq > 0 and (epoch % checkpoint_freq == 0):
                 modelparts = str(model_dest).rsplit(".", maxsplit=1)
                 checkpoint_name = modelparts[0] + f"_epoch{epoch}." + modelparts[1]
@@ -517,14 +610,18 @@ def train_epochs(model,
                 }
                 torch.save(ckpt_data, checkpoint_name)
 
+
         logger.info(f"Training completed after {epoch} epochs")
     except KeyboardInterrupt:
         pass
+
 
     if model_dest is not None:
         logger.info(f"Saving model state dict to {model_dest}")
         m = model.module if isinstance(model, nn.DataParallel) else model
         torch.save(m.to('cpu').state_dict(), model_dest)
+
+
 
 
 def load_train_conf(confyaml):
@@ -535,6 +632,8 @@ def load_train_conf(confyaml):
     return conf
 
 
+
+
 def init_count_dict():
     return {
         'del': defaultdict(int),
@@ -542,6 +641,7 @@ def init_count_dict():
         'snv': defaultdict(int),
         'mnv': defaultdict(int),
     }
+
 
 def set_comet_conf(model_tot_params, **kwargs):
     """ Set various config params for logging in WandB / Comet"""
@@ -567,10 +667,12 @@ def set_comet_conf(model_tot_params, **kwargs):
         commandline=' '.join(sys.argv),
     )
 
+
     # change working dir so wandb finds git repo info
     current_working_dir = os.getcwd()
     git_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(git_dir)
+
 
     experiment.log_parameters({
         "config": run_config_params,
@@ -578,8 +680,11 @@ def set_comet_conf(model_tot_params, **kwargs):
     })
     experiment.set_name(kwargs.get('run_name'))
 
+
     # back to correct working dir
     os.chdir(current_working_dir)
+
+
 
 
 def load_conf(conf_file, **kwargs):
@@ -587,6 +692,8 @@ def load_conf(conf_file, **kwargs):
         conf = yaml.safe_load(fh)
     conf.update((k,v) for k,v in kwargs.items() if v is not None)
     return conf
+
+
 
 
 def train(output_model, **kwargs):
@@ -598,13 +705,16 @@ def train(output_model, **kwargs):
     :param epochs: How many passes over training data to conduct
     """
 
+
     kwargs = load_conf(kwargs.get('config'), **kwargs)
     run_name = kwargs.get("run_name", "training_run")
     dest = f"{run_name}_training_conf.yaml"
     with open(dest, "w") as fh:
         fh.write(yaml.dump(kwargs) + "\n")
 
+
     global DEVICE
+
 
     if USE_DDP:
         logger.info(f"Using DDP: Master addr: {os.environ['MASTER_ADDR']}, port: {os.environ['MASTER_PORT']}, global rank: {os.environ['RANK']}, world size: {os.environ['WORLD_SIZE']}") 
@@ -629,11 +739,13 @@ def train(output_model, **kwargs):
     
     logger.info(f"Using pregenerated training data from {kwargs.get('datadir')}")
 
+
     dataloader = loader.PregenLoader(DEVICE,
                                      kwargs.get("datadir"),
                                      threads=kwargs.get('threads'),
                                      max_decomped_batches=kwargs.get('max_decomp_batches'),
                                      tgt_prefix="tgkmers")
+
 
     if kwargs.get('input_model'):
         ckpt = torch.load(kwargs.get("input_model"), map_location=DEVICE)
@@ -641,10 +753,12 @@ def train(output_model, **kwargs):
         ckpt = None
     model = load_model(kwargs['model'], ckpt)
 
+
     model_tot_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Model total parameter count: {model_tot_params}")
     if experiment:
         set_comet_conf(model_tot_params, **kwargs)
+
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -655,6 +769,7 @@ def train(output_model, **kwargs):
         logger.info("Loading optimizer state dict from checkpoint")
         optimizer.load_state_dict(ckpt.get('opt'))
 
+
     init_learning_rate = kwargs.get('learning_rate', 0.0001)
     scheduler = util.WarmupCosineLRScheduler(
         max_lr=init_learning_rate,
@@ -662,6 +777,7 @@ def train(output_model, **kwargs):
         warmup_iters=kwargs.get('lr_warmup_iters', 1e6),
         lr_decay_iters=kwargs.get('lr_decay_iters', 20e6),
     )
+
 
     train_epochs(model,
                  optimizer,
